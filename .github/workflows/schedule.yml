@@ -2,7 +2,11 @@ name: attendance
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    # GitHub 的定时任务是"尽力而为"，整点最挤、容易被延迟甚至跳过，
+    # 所以错开整点并设三次兜底；当天已签过会跳过签到，通知也会去重。
+    - cron: '23 0 * * *'   # UTC 0:23 = 北京时间 08:23
+    - cron: '47 3 * * *'   # UTC 3:47 = 北京时间 11:47（上一次没跑成功时兜底）
+    - cron: '13 8 * * *'   # UTC 8:13 = 北京时间 16:13（再兜一次，确保当天不断签）
   workflow_dispatch:
   workflow_call:
     secrets:
@@ -20,6 +24,10 @@ on:
         default: enpitsuLin/skland-daily-attendance
         required: false
         type: string
+
+concurrency:
+  group: skland-attendance
+  cancel-in-progress: false
 
 jobs:
   attendance:
@@ -45,6 +53,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
+      # 通知去重状态：同一天里同类结果只推送一次
+      - name: Restore notification state
+        uses: actions/cache/restore@v5
+        with:
+          path: .notify-state
+          key: skland-notify-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: skland-notify-v1-
+
       - name: Run daily attendance
         run: pnpm action
         env:
@@ -52,6 +68,14 @@ jobs:
           SKLAND_NOTIFICATION_URLS: ${{ secrets.SKLAND_NOTIFICATION_URLS }}
           SKLAND_MAX_RETRIES: ${{ secrets.SKLAND_MAX_RETRIES }}
           SKLAND_ANONYMOUS: ${{ secrets.SKLAND_ANONYMOUS }}
+          NOTIFY_STATE_PATH: .notify-state/notification.json
+
+      - name: Save notification state
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: .notify-state
+          key: skland-notify-v1-${{ github.run_id }}-${{ github.run_attempt }}
 
   workflow-keepalive:
     if: github.event_name == 'schedule'

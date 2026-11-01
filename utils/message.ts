@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createNotifier } from 'statocysts'
 
 export function toArray<T>(value: T | T[]): T[] {
@@ -33,6 +35,79 @@ export interface MessageCollector {
 
   /** @deprecated Use notify(), info(), or notifyError() instead */
   collect: (message: string, options?: CollectOptions) => void
+}
+
+interface NotifyState {
+  date: string
+  success: boolean
+  failures: string[]
+}
+
+function todayInShanghai(): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date())
+}
+
+async function loadState(path: string): Promise<NotifyState | null> {
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf8'))
+    if (parsed && typeof parsed === 'object')
+      return parsed as NotifyState
+  }
+  catch {
+    // 首次运行或状态文件损坏，按未推送处理
+  }
+  return null
+}
+
+async function saveState(path: string, state: NotifyState): Promise<void> {
+  const index = path.lastIndexOf('/')
+  if (index > 0)
+    await mkdir(path.slice(0, index), { recursive: true })
+  await writeFile(path, JSON.stringify(state))
+}
+
+/** 给每条角色结果加上与原神签到一致的状态标记 */
+function decorate(line: string): string {
+  if (line.includes('签到成功'))
+    return `✅ ${line}`
+  if (line.includes('今天已经签到过了') || line.includes('跳过签到') || line.includes('没有角色'))
+    return `➖ ${line}`
+  if (line.includes('失败') || line.includes('错误'))
+    return `❌ ${line}`
+  return line
+}
+
+/** 把内部消息整理成原神签到那种紧凑格式 */
+function buildBodyLines(messages: string[]): string[] {
+  const lines: string[] = []
+  for (const message of messages) {
+    for (const rawLine of message.split('\n')) {
+      const line = rawLine.trim()
+      if (!line)
+        continue
+      // 旧的自带标题行由新标题取代
+      if (line.startsWith('##'))
+        continue
+      if (/^=+\s*执行摘要\s*=+$/.test(line)) {
+        lines.push('—— 执行摘要 ——')
+        continue
+      }
+      const account = line.match(/^-+\s*账号\s*(\d+)\s*\/\s*(\d+)\s*-+$/)
+      if (account) {
+        lines.push(`【账号${account[1]}】`)
+        continue
+      }
+      if (line === '开始处理...')
+        continue
+      lines.push(decorate(line))
+    }
+  }
+  return lines
 }
 
 export function createMessageCollector(options: CreateMessageCollectorOptions): MessageCollector {
@@ -89,19 +164,45 @@ export function createMessageCollector(options: CreateMessageCollectorOptions): 
   }
 
   const push = async () => {
-    const title = '【森空岛每日签到】'
-    const content = messages.join('\n\n')
     const urls = options.notificationUrls ? toArray(options.notificationUrls) : []
 
     if (urls.length > 0) {
-      const notifier = createNotifier(urls)
-      try {
-        await notifier.send({ title, body: content })
+      const status = hasError ? '❌' : (messages.some(m => m.includes('签到成功')) ? '✅' : '➖')
+      const date = todayInShanghai()
+      const title = `${status} 森空岛签到结果`
+      const content = [`签到日期：${date}（北京时间）`, '', ...buildBodyLines(messages)].join('\n')
+      const digest = createHash('sha256').update(content).digest('hex')
+
+      // 一天跑多次时，同一类结果只推送一次
+      const statePath = process.env.NOTIFY_STATE_PATH || '.notify-state/notification.json'
+      const state = await loadState(statePath)
+      const sameDay = state?.date === date
+      const pushed = sameDay === true
+        && (status === '❌'
+          ? (state?.failures || []).includes(digest)
+          : state?.success === true)
+
+      if (pushed) {
+        console.log('今日同类通知已发送，跳过重复推送；签到检查仍正常执行')
       }
-      catch (sendError) {
-        // Don't let notification failures crash the attendance task
-        console.error('[notify] send failed:', sendError)
-        hasError = true
+      else {
+        const notifier = createNotifier(urls)
+        try {
+          await notifier.send({ title, body: content })
+          const next: NotifyState = sameDay && state ? state : { date, success: false, failures: [] }
+          if (!Array.isArray(next.failures))
+            next.failures = []
+          if (status === '❌')
+            next.failures.push(digest)
+          else
+            next.success = true
+          await saveState(statePath, next)
+        }
+        catch (sendError) {
+          // Don't let notification failures crash the attendance task
+          console.error('[notify] send failed:', sendError)
+          hasError = true
+        }
       }
     }
 

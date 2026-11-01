@@ -243,9 +243,10 @@ export default defineTask<'success' | 'failed'>({
       }
     }
 
-    if (stats.accounts.successful > 0 || stats.accounts.failed > 0)
-      await messageCollector.push()
+    // 即使今天全部已签过也要推送一次结果，和原神签到保持一致
+    await messageCollector.push()
 
     return { result: hasFailed ? 'failed' : 'success' }
   },
 })
+
