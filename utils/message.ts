@@ -82,21 +82,21 @@ function decorate(line: string): string {
   return line
 }
 
-/** 把内部消息整理成原神签到那种紧凑格式 */
+/** 把内部消息整理成原神签到那种紧凑格式（只保留账号与角色结果，不带统计摘要） */
 function buildBodyLines(messages: string[]): string[] {
   const lines: string[] = []
+  outer:
   for (const message of messages) {
     for (const rawLine of message.split('\n')) {
       const line = rawLine.trim()
       if (!line)
         continue
+      // 统计摘要整段丢弃，保持与原神签到同样精简
+      if (line.includes('执行摘要'))
+        break outer
       // 旧的自带标题行由新标题取代
       if (line.startsWith('##'))
         continue
-      if (/^=+\s*执行摘要\s*=+$/.test(line)) {
-        lines.push('—— 执行摘要 ——')
-        continue
-      }
       const account = line.match(/^-+\s*账号\s*(\d+)\s*\/\s*(\d+)\s*-+$/)
       if (account) {
         lines.push(`【账号${account[1]}】`)
